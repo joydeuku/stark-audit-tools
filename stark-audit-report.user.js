@@ -3,6 +3,7 @@
 // @namespace    http://tampermonkey.net/
 // @version      7.0
 // @description  Auto-discovers queues from Stark and generates Slack pending report by marketplace
+// @author       Joydeep
 // @match        https://console.harmony.a2z.com/stark/*
 // @grant        GM_setClipboard
 // @grant        GM_xmlhttpRequest
