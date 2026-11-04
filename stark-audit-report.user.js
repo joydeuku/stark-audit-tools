@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Stark Audit Report Generator
 // @namespace    http://tampermonkey.net/
-// @version      7.0
+// @version      8.1
 // @description  Auto-discovers queues from Stark and generates Slack pending report by marketplace
 // @author       Joydeep
 // @match        https://console.harmony.a2z.com/stark/*
@@ -41,7 +41,7 @@
     if (templateName.endsWith('_FR')) return 'FR';
     if (templateName.endsWith('_DE')) return 'DE';
     if (templateName.endsWith('_EN')) return 'EN';
-    return 'EN'; // default
+    return 'EN';
   }
 
   function cleanName(templateName) {
@@ -86,7 +86,7 @@
           'Origin': 'https://console.harmony.a2z.com',
           'Referer': 'https://console.harmony.a2z.com/stark/Queue',
         },
-        timeout: 20000,
+        timeout: 30000,
         onload: (r) => {
           if (r.status !== 200) { resolve(null); return; }
           try { resolve(JSON.parse(r.responseText)); } catch { resolve(null); }
@@ -97,11 +97,11 @@
     });
   }
 
-  async function gmRequestWithRetry(url, retries = 2) {
+  async function gmRequestWithRetry(url, retries = 3) {
     for (let i = 0; i <= retries; i++) {
       const result = await gmRequest(url);
       if (result !== null) return result;
-      if (i < retries) await new Promise(r => setTimeout(r, 1000 * (i + 1)));
+      if (i < retries) await new Promise(r => setTimeout(r, 2000 * Math.pow(2, i)));
     }
     return null;
   }
@@ -125,9 +125,9 @@
   }
 
   async function fetchCount(sourceId, weekNo, year) {
-    const url = `${API_HOST}/statistics/taskcount?workflowType=QUEUE&sourceId=${sourceId}&weekNo=${weekNo}&year=${year}`;
+    const url = `${API_HOST}/statistics/taskcount?workflowType=QUEUE&sourceId=${encodeURIComponent(sourceId)}&weekNo=${weekNo}&year=${year}`;
     const data = await gmRequestWithRetry(url);
-    if (!data) return { error: 'Failed after 3 attempts' };
+    if (!data) return { error: 'Failed after retries' };
     const stats = data?.taskCountStats?.[0]?.taskCount || [];
     let completed = 0, unworked = 0, assigned = 0;
     for (const s of stats) {
@@ -144,7 +144,6 @@
     const dateStr = now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
     const timeStr = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
 
-    // Group: marketplace → category → rows
     const grouped = {};
     for (const r of rows) {
       if (!grouped[r.marketplace]) grouped[r.marketplace] = {};
@@ -152,7 +151,6 @@
       grouped[r.marketplace][r.category].push(r);
     }
 
-    // Collect all pending rows for overall summary
     const allPending = rows.filter(r => r.pending > 0);
     const grandVol = allPending.reduce((s, r) => s + r.volume, 0);
     const grandComp = allPending.reduce((s, r) => s + r.completed, 0);
@@ -174,7 +172,6 @@
       return report;
     }
 
-    // Sort marketplaces: known order first, then any extras alphabetically
     const allMarketplaces = Object.keys(grouped);
     const sortedMarketplaces = [
       ...MARKETPLACE_ORDER.filter(m => allMarketplaces.includes(m)),
@@ -183,15 +180,12 @@
 
     for (const mp of sortedMarketplaces) {
       const cats = grouped[mp];
-
-      // Check if this marketplace has any pending rows
       let mpPending = 0;
       for (const cat of CAT_ORDER) {
         if (cats[cat]) mpPending += cats[cat].filter(r => r.pending > 0).length;
       }
       if (mpPending === 0) continue;
 
-      // Marketplace totals (only pending rows)
       let mpVol = 0, mpComp = 0, mpPend = 0;
       for (const cat of CAT_ORDER) {
         if (cats[cat]) {
@@ -243,7 +237,7 @@
 
     const header = document.createElement('div');
     header.style.cssText = 'background:linear-gradient(135deg,#1a1a2e,#16213e);color:#fff;padding:14px 18px;font-weight:700;font-size:15px;display:flex;justify-content:space-between;align-items:center;';
-    header.innerHTML = '<span>⚡ Stark Audit Report</span>';
+    header.innerHTML = '<span>⚡ Stark Audit Report v8.1</span>';
     const closeBtn = document.createElement('button');
     closeBtn.innerHTML = '✕';
     closeBtn.style.cssText = 'background:none;border:none;color:#fff;font-size:18px;cursor:pointer;';
@@ -276,41 +270,31 @@
     document.body.appendChild(panel);
 
     let lastReport = '';
+    let lastUsername = '';
+    let lastSources = [];
+    let successRows = [];
+    let failedTasks = [];
+    let totalCalls = 0;
 
-    btn.onclick = async () => {
-      panel.style.display = 'block';
-      previewDiv.style.display = 'none';
-      actionsDiv.style.display = 'none';
-      debugDiv.style.display = 'none';
-      statusDiv.style.background = '#ebf5fb';
-      statusDiv.style.color = '#2980b9';
-
-      const username = getUsername();
-      if (!username) {
-        statusDiv.style.background = '#fdecea';
-        statusDiv.style.color = '#721c24';
-        statusDiv.innerHTML = '❌ Could not detect username. Make sure the Stark page is fully loaded.';
-        return;
+    function processResults(results) {
+      const newSuccess = [];
+      const newFailed = [];
+      for (const r of results) {
+        if (r.data.error) {
+          newFailed.push({ sourceId: r.sourceId, cat: r.cat, name: r.name, marketplace: r.marketplace, week: r.week, year: r.year });
+        } else {
+          const volume = r.data.completed + r.data.unworked + r.data.assigned;
+          const pending = r.data.unworked + r.data.assigned;
+          newSuccess.push({ name: r.name, category: r.cat, marketplace: r.marketplace, week: r.week, volume, completed: r.data.completed, pending });
+        }
       }
-      statusDiv.innerHTML = `⏳ Logged in as <b>${username}</b> — discovering sources...`;
+      return { newSuccess, newFailed };
+    }
 
-      const startTime = Date.now();
-      let debugLog = `👤 User: ${username}\n\n`;
-
-      const sources = await discoverSources(username);
-
-      if (!sources || sources.length === 0) {
-        statusDiv.style.background = '#fdecea';
-        statusDiv.style.color = '#721c24';
-        statusDiv.innerHTML = `❌ No sources found for <b>${username}</b>.`;
-        debugDiv.style.display = 'block';
-        debugDiv.textContent = `${debugLog}API failed after retries.`;
-        return;
-      }
-
-      debugLog += `📡 Discovered ${sources.length} sources:\n`;
+    function renderReport(elapsed) {
+      let debugLog = `👤 User: ${lastUsername}\n\n📡 Discovered ${lastSources.length} sources:\n`;
       for (const mp of MARKETPLACE_ORDER) {
-        const mpSources = sources.filter(s => s.marketplace === mp);
+        const mpSources = lastSources.filter(s => s.marketplace === mp);
         if (mpSources.length === 0) continue;
         debugLog += `\n  🌍 ${mp} (${mpSources.length}):\n`;
         for (const cat of CAT_ORDER) {
@@ -321,60 +305,19 @@
         }
       }
       debugLog += `\n${'─'.repeat(40)}\n`;
-
-      const totalCalls = sources.reduce((s, src) => s + getWeekOffsets(src.category).length, 0);
-      let failCount = 0;
-      statusDiv.innerHTML = `⏳ <b>${username}</b> — fetching ${totalCalls} counts (with auto-retry)...`;
-
-      const allPromises = [];
-      for (const src of sources) {
-        for (const offset of getWeekOffsets(src.category)) {
-          const { week, year } = getWeekAndYear(offset);
-          allPromises.push(
-            fetchCount(src.id, week, year).then(data => ({
-              cat: src.category, name: src.name, marketplace: src.marketplace, week, data,
-            }))
-          );
-        }
-      }
-
-      const allResults = await Promise.all(allPromises);
-
-      const allRows = [];
-      for (const { cat, name, marketplace, week, data } of allResults) {
-        if (data.error) {
-          failCount++;
-          debugLog += `❌ ${name} (${cat}/${marketplace}) Wk${week}: ${data.error}\n`;
-          continue;
-        }
-        const volume = data.completed + data.unworked + data.assigned;
-        const pending = data.unworked + data.assigned;
-        debugLog += `✅ ${name} (${cat}/${marketplace}) Wk${week}: Vol=${volume} Comp=${data.completed} Pend=${pending}\n`;
-        allRows.push({ name, category: cat, marketplace, week, volume, completed: data.completed, pending });
-      }
-
-      const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+      for (const r of successRows) debugLog += `✅ ${r.name} (${r.category}/${r.marketplace}) Wk${r.week}: Vol=${r.volume} Comp=${r.completed} Pend=${r.pending}\n`;
+      for (const f of failedTasks) debugLog += `❌ ${f.name} (${f.cat}/${f.marketplace}) Wk${f.week}: Failed after retries\n`;
 
       debugDiv.style.display = 'block';
-      debugDiv.textContent = `👤 ${username} | ${sources.length} sources | ${totalCalls} calls in ${elapsed}s | Failed: ${failCount}\n${'─'.repeat(40)}\n${debugLog}`;
+      debugDiv.textContent = `👤 ${lastUsername} | ${lastSources.length} sources | ${totalCalls} calls in ${elapsed}s | Failed: ${failedTasks.length}\n${'─'.repeat(40)}\n${debugLog}`;
 
-      lastReport = generateReport(allRows, username);
-
-      if (failCount > 0) {
-        statusDiv.style.background = '#fef9e7';
-        statusDiv.style.color = '#856404';
-        statusDiv.innerHTML = `⚠️ <b>${username}</b> — Done in ${elapsed}s. ${failCount}/${totalCalls} failed (after retries).`;
-      } else {
-        statusDiv.style.background = '#e8f8f0';
-        statusDiv.style.color = '#155724';
-        statusDiv.innerHTML = `✅ <b>${username}</b> — Done in ${elapsed}s. ${sources.length} sources, all OK!`;
-      }
-
+      lastReport = generateReport(successRows, lastUsername);
       previewDiv.style.display = 'block';
       previewDiv.textContent = lastReport;
       actionsDiv.style.display = 'flex';
       actionsDiv.innerHTML = '';
 
+      // Copy button
       const copyBtn = document.createElement('button');
       copyBtn.innerHTML = '📋 Copy to Clipboard';
       copyBtn.style.cssText = 'padding:8px 16px;border-radius:6px;border:none;background:#27ae60;color:#fff;font-size:13px;font-weight:600;cursor:pointer;';
@@ -393,6 +336,105 @@
         }
       };
       actionsDiv.appendChild(copyBtn);
+
+      // Retry Failed button (only if there are failures)
+      if (failedTasks.length > 0) {
+        statusDiv.style.background = '#fef9e7';
+        statusDiv.style.color = '#856404';
+        statusDiv.innerHTML = `⚠️ <b>${lastUsername}</b> — Done in ${elapsed}s. ${failedTasks.length} failed.`;
+
+        const retryBtn = document.createElement('button');
+        retryBtn.innerHTML = `🔄 Retry ${failedTasks.length} Failed`;
+        retryBtn.style.cssText = 'padding:8px 16px;border-radius:6px;border:none;background:#e67e22;color:#fff;font-size:13px;font-weight:600;cursor:pointer;';
+        retryBtn.onclick = async () => {
+          retryBtn.disabled = true;
+          retryBtn.innerHTML = '⏳ Retrying...';
+          retryBtn.style.opacity = '0.6';
+          statusDiv.style.background = '#ebf5fb';
+          statusDiv.style.color = '#2980b9';
+          statusDiv.innerHTML = `⏳ Retrying ${failedTasks.length} failed calls...`;
+
+          const retryStart = Date.now();
+          const toRetry = [...failedTasks];
+
+          const retryResults = await Promise.all(
+            toRetry.map(f =>
+              fetchCount(f.sourceId, f.week, f.year).then(data => ({
+                sourceId: f.sourceId, cat: f.cat, name: f.name,
+                marketplace: f.marketplace, week: f.week, year: f.year, data,
+              }))
+            )
+          );
+
+          const { newSuccess, newFailed } = processResults(retryResults);
+          successRows.push(...newSuccess);
+          failedTasks = newFailed;
+          totalCalls += toRetry.length;
+
+          const retryElapsed = ((Date.now() - retryStart) / 1000).toFixed(1);
+          renderReport(`${elapsed}+${retryElapsed}`);
+        };
+        actionsDiv.appendChild(retryBtn);
+      } else {
+        statusDiv.style.background = '#e8f8f0';
+        statusDiv.style.color = '#155724';
+        statusDiv.innerHTML = `✅ <b>${lastUsername}</b> — Done in ${elapsed}s. All queues fetched!`;
+      }
+    }
+
+    btn.onclick = async () => {
+      panel.style.display = 'block';
+      previewDiv.style.display = 'none';
+      actionsDiv.style.display = 'none';
+      debugDiv.style.display = 'none';
+      statusDiv.style.background = '#ebf5fb';
+      statusDiv.style.color = '#2980b9';
+      successRows = [];
+      failedTasks = [];
+
+      const username = getUsername();
+      if (!username) {
+        statusDiv.style.background = '#fdecea';
+        statusDiv.style.color = '#721c24';
+        statusDiv.innerHTML = '❌ Could not detect username. Make sure the Stark page is fully loaded.';
+        return;
+      }
+      lastUsername = username;
+      statusDiv.innerHTML = `⏳ <b>${username}</b> — discovering sources...`;
+
+      const startTime = Date.now();
+      const sources = await discoverSources(username);
+      if (!sources || sources.length === 0) {
+        statusDiv.style.background = '#fdecea';
+        statusDiv.style.color = '#721c24';
+        statusDiv.innerHTML = `❌ No sources found for <b>${username}</b>.`;
+        return;
+      }
+      lastSources = sources;
+
+      const tasks = [];
+      for (const src of sources) {
+        for (const offset of getWeekOffsets(src.category)) {
+          const { week, year } = getWeekAndYear(offset);
+          tasks.push({ sourceId: src.id, cat: src.category, name: src.name, marketplace: src.marketplace, week, year });
+        }
+      }
+      totalCalls = tasks.length;
+      statusDiv.innerHTML = `⏳ <b>${username}</b> — fetching ${totalCalls} counts (all parallel)...`;
+
+      // All at once — fast!
+      const results = await Promise.all(
+        tasks.map(t =>
+          fetchCount(t.sourceId, t.week, t.year).then(data => ({ ...t, data }))
+        )
+      );
+
+      const { newSuccess, newFailed } = processResults(results);
+      successRows = newSuccess;
+      failedTasks = newFailed;
+
+      const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+      renderReport(elapsed);
     };
   }
 
