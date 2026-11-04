@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Stark Audit Report Generator
 // @namespace    http://tampermonkey.net/
-// @version      8.1
+// @version      1
 // @description  Auto-discovers queues from Stark and generates Slack pending report by marketplace
 // @author       Joydeep
 // @match        https://console.harmony.a2z.com/stark/*
@@ -152,6 +152,7 @@
     }
 
     const allPending = rows.filter(r => r.pending > 0);
+    const allCompleted = rows.filter(r => r.pending === 0 && r.volume > 0);
     const grandVol = allPending.reduce((s, r) => s + r.volume, 0);
     const grandComp = allPending.reduce((s, r) => s + r.completed, 0);
     const grandPend = allPending.reduce((s, r) => s + r.pending, 0);
@@ -167,9 +168,6 @@
 
     if (allPending.length === 0) {
       report += `✅ *All queues are clear — no pending audits!*\n\n`;
-      report += `${'─'.repeat(50)}\n`;
-      report += `_Sent via Stark Audit Auto-Report (${username})_`;
-      return report;
     }
 
     const allMarketplaces = Object.keys(grouped);
@@ -178,46 +176,75 @@
       ...allMarketplaces.filter(m => !MARKETPLACE_ORDER.includes(m)).sort(),
     ];
 
-    for (const mp of sortedMarketplaces) {
-      const cats = grouped[mp];
-      let mpPending = 0;
-      for (const cat of CAT_ORDER) {
-        if (cats[cat]) mpPending += cats[cat].filter(r => r.pending > 0).length;
-      }
-      if (mpPending === 0) continue;
+    // Pending queues section
+    if (allPending.length > 0) {
+      for (const mp of sortedMarketplaces) {
+        const cats = grouped[mp];
+        let mpPending = 0;
+        for (const cat of CAT_ORDER) {
+          if (cats[cat]) mpPending += cats[cat].filter(r => r.pending > 0).length;
+        }
+        if (mpPending === 0) continue;
 
-      let mpVol = 0, mpComp = 0, mpPend = 0;
-      for (const cat of CAT_ORDER) {
-        if (cats[cat]) {
-          for (const r of cats[cat].filter(r => r.pending > 0)) {
-            mpVol += r.volume;
-            mpComp += r.completed;
-            mpPend += r.pending;
+        let mpVol = 0, mpComp = 0, mpPend = 0;
+        for (const cat of CAT_ORDER) {
+          if (cats[cat]) {
+            for (const r of cats[cat].filter(r => r.pending > 0)) {
+              mpVol += r.volume;
+              mpComp += r.completed;
+              mpPend += r.pending;
+            }
           }
         }
-      }
 
-      report += `${'═'.repeat(50)}\n`;
-      report += `*🌍 ${mp}* (Pending: ${mpPend} | Vol: ${mpVol} | Completed: ${mpComp})\n`;
+        report += `${'═'.repeat(50)}\n`;
+        report += `*🌍 ${mp}* (Pending: ${mpPend} | Vol: ${mpVol} | Completed: ${mpComp})\n`;
 
-      for (const cat of CAT_ORDER) {
-        if (!cats[cat]) continue;
-        const pendingRows = cats[cat].filter(r => r.pending > 0);
-        if (pendingRows.length === 0) continue;
+        for (const cat of CAT_ORDER) {
+          if (!cats[cat]) continue;
+          const pendingRows = cats[cat].filter(r => r.pending > 0);
+          if (pendingRows.length === 0) continue;
 
-        const catVol = pendingRows.reduce((s, r) => s + r.volume, 0);
-        const catComp = pendingRows.reduce((s, r) => s + r.completed, 0);
-        const catPend = pendingRows.reduce((s, r) => s + r.pending, 0);
+          const catVol = pendingRows.reduce((s, r) => s + r.volume, 0);
+          const catComp = pendingRows.reduce((s, r) => s + r.completed, 0);
+          const catPend = pendingRows.reduce((s, r) => s + r.pending, 0);
 
-        report += `\n${'─'.repeat(50)}\n`;
-        report += `*📋 ${cat}* (Pending: ${catPend})\n\n`;
-        report += `| Process | Wk | Audit Vol | Completed | Pending |\n`;
-        report += `|---------|----|-----------|-----------|----------|\n`;
+          report += `\n${'─'.repeat(50)}\n`;
+          report += `*📋 ${cat}* (Pending: ${catPend})\n\n`;
+          report += `| Process | Wk | Audit Vol | Completed | Pending |\n`;
+          report += `|---------|----|-----------|-----------|----------|\n`;
 
-        for (const r of pendingRows) {
-          report += `| ${r.name} | ${r.week} | ${r.volume} | ${r.completed} | *${r.pending}* |\n`;
+          for (const r of pendingRows) {
+            report += `| ${r.name} | ${r.week} | ${r.volume} | ${r.completed} | *${r.pending}* |\n`;
+          }
+          report += `| *Total* | | *${catVol}* | *${catComp}* | *${catPend}* |\n`;
         }
-        report += `| *Total* | | *${catVol}* | *${catComp}* | *${catPend}* |\n`;
+        report += `\n`;
+      }
+    }
+
+    // Completed processes section — with week numbers
+    if (allCompleted.length > 0) {
+      report += `${'═'.repeat(50)}\n`;
+      report += `*✅ Completed Processes (No Pending)*\n\n`;
+
+      for (const mp of sortedMarketplaces) {
+        const mpCompleted = allCompleted.filter(r => r.marketplace === mp);
+        if (mpCompleted.length === 0) continue;
+
+        const byCat = {};
+        for (const r of mpCompleted) {
+          if (!byCat[r.category]) byCat[r.category] = [];
+          byCat[r.category].push(`${r.name} (W${r.week})`);
+        }
+
+        const parts = [];
+        for (const cat of CAT_ORDER) {
+          if (!byCat[cat]) continue;
+          parts.push(`${cat}: ${byCat[cat].join(', ')}`);
+        }
+
+        report += `• *${mp}* — ${parts.join(' | ')} ✅\n`;
       }
       report += `\n`;
     }
@@ -237,7 +264,7 @@
 
     const header = document.createElement('div');
     header.style.cssText = 'background:linear-gradient(135deg,#1a1a2e,#16213e);color:#fff;padding:14px 18px;font-weight:700;font-size:15px;display:flex;justify-content:space-between;align-items:center;';
-    header.innerHTML = '<span>⚡ Stark Audit Report v8.1</span>';
+    header.innerHTML = '<span>⚡ Stark Audit Report v8.3</span>';
     const closeBtn = document.createElement('button');
     closeBtn.innerHTML = '✕';
     closeBtn.style.cssText = 'background:none;border:none;color:#fff;font-size:18px;cursor:pointer;';
@@ -317,7 +344,6 @@
       actionsDiv.style.display = 'flex';
       actionsDiv.innerHTML = '';
 
-      // Copy button
       const copyBtn = document.createElement('button');
       copyBtn.innerHTML = '📋 Copy to Clipboard';
       copyBtn.style.cssText = 'padding:8px 16px;border-radius:6px;border:none;background:#27ae60;color:#fff;font-size:13px;font-weight:600;cursor:pointer;';
@@ -337,7 +363,6 @@
       };
       actionsDiv.appendChild(copyBtn);
 
-      // Retry Failed button (only if there are failures)
       if (failedTasks.length > 0) {
         statusDiv.style.background = '#fef9e7';
         statusDiv.style.color = '#856404';
@@ -422,7 +447,6 @@
       totalCalls = tasks.length;
       statusDiv.innerHTML = `⏳ <b>${username}</b> — fetching ${totalCalls} counts (all parallel)...`;
 
-      // All at once — fast!
       const results = await Promise.all(
         tasks.map(t =>
           fetchCount(t.sourceId, t.week, t.year).then(data => ({ ...t, data }))
