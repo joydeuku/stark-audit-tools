@@ -144,30 +144,28 @@
     const dateStr = now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
     const timeStr = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
 
+    const pendingRows = rows.filter(r => r.pending > 0);
+
     const grouped = {};
-    for (const r of rows) {
+    for (const r of pendingRows) {
       if (!grouped[r.marketplace]) grouped[r.marketplace] = {};
       if (!grouped[r.marketplace][r.category]) grouped[r.marketplace][r.category] = [];
       grouped[r.marketplace][r.category].push(r);
     }
 
-    const allPending = rows.filter(r => r.pending > 0);
-    const allCompleted = rows.filter(r => r.pending === 0 && r.volume > 0);
-    const grandVol = allPending.reduce((s, r) => s + r.volume, 0);
-    const grandComp = allPending.reduce((s, r) => s + r.completed, 0);
-    const grandPend = allPending.reduce((s, r) => s + r.pending, 0);
+    const grandVol = pendingRows.reduce((s, r) => s + r.volume, 0);
+    const grandComp = pendingRows.reduce((s, r) => s + r.completed, 0);
+    const grandPend = pendingRows.reduce((s, r) => s + r.pending, 0);
 
-    let report = `📊 *Stark Audit — Pending Count Status (${timeLabel} Update)*\n`;
-    report += `📅 ${dateStr} | 🕐 ${timeStr}\n`;
-    report += `${'─'.repeat(50)}\n\n`;
+    let report = `*Stark Audit — Pending Status (${timeLabel} Update)*\n`;
+    report += `${dateStr} | ${timeStr}\n`;
+    report += `${'─'.repeat(40)}\n`;
+    report += `Total Volume: *${grandVol}*  |  Completed: *${grandComp}*  |  Pending: *${grandPend}*\n\n`;
 
-    report += `*📈 Overall Summary*\n`;
-    report += `• Total Audit Volume: *${grandVol}*\n`;
-    report += `• Total Completed: *${grandComp}*\n`;
-    report += `• 🔴 Total Pending: *${grandPend}*\n\n`;
-
-    if (allPending.length === 0) {
-      report += `✅ *All queues are clear — no pending audits!*\n\n`;
+    if (pendingRows.length === 0) {
+      report += `All queues are clear — no pending audits.\n\n`;
+      report += `_Sent via Stark Audit Report (${username})_`;
+      return report;
     }
 
     const allMarketplaces = Object.keys(grouped);
@@ -176,81 +174,39 @@
       ...allMarketplaces.filter(m => !MARKETPLACE_ORDER.includes(m)).sort(),
     ];
 
-    // Pending queues section
-    if (allPending.length > 0) {
-      for (const mp of sortedMarketplaces) {
-        const cats = grouped[mp];
-        let mpPending = 0;
-        for (const cat of CAT_ORDER) {
-          if (cats[cat]) mpPending += cats[cat].filter(r => r.pending > 0).length;
+    for (const mp of sortedMarketplaces) {
+      const cats = grouped[mp];
+      let mpPend = 0;
+      for (const cat of CAT_ORDER) {
+        if (cats[cat]) mpPend += cats[cat].reduce((s, r) => s + r.pending, 0);
+      }
+
+      report += `${'─'.repeat(40)}\n`;
+      report += `*[ ${mp} ]  —  Pending: ${mpPend}*\n`;
+
+      for (const cat of CAT_ORDER) {
+        if (!cats[cat] || cats[cat].length === 0) continue;
+        const catRows = cats[cat];
+
+        report += `\n*${cat}*\n`;
+        report += `| Process | Wk | Vol | Done | *Pending* |\n`;
+        report += `|---|---|---|---|---|\n`;
+
+        for (const r of catRows) {
+          report += `| ${r.name} | W${r.week} | ${r.volume} | ${r.completed} | *${r.pending}* |\n`;
         }
-        if (mpPending === 0) continue;
 
-        let mpVol = 0, mpComp = 0, mpPend = 0;
-        for (const cat of CAT_ORDER) {
-          if (cats[cat]) {
-            for (const r of cats[cat].filter(r => r.pending > 0)) {
-              mpVol += r.volume;
-              mpComp += r.completed;
-              mpPend += r.pending;
-            }
-          }
-        }
-
-        report += `${'═'.repeat(50)}\n`;
-        report += `*🌍 ${mp}* (Pending: ${mpPend} | Vol: ${mpVol} | Completed: ${mpComp})\n`;
-
-        for (const cat of CAT_ORDER) {
-          if (!cats[cat]) continue;
-          const pendingRows = cats[cat].filter(r => r.pending > 0);
-          if (pendingRows.length === 0) continue;
-
-          const catVol = pendingRows.reduce((s, r) => s + r.volume, 0);
-          const catComp = pendingRows.reduce((s, r) => s + r.completed, 0);
-          const catPend = pendingRows.reduce((s, r) => s + r.pending, 0);
-
-          report += `\n${'─'.repeat(50)}\n`;
-          report += `*📋 ${cat}* (Pending: ${catPend})\n\n`;
-          report += `| Process | Wk | Audit Vol | Completed | Pending |\n`;
-          report += `|---------|----|-----------|-----------|----------|\n`;
-
-          for (const r of pendingRows) {
-            report += `| ${r.name} | ${r.week} | ${r.volume} | ${r.completed} | *${r.pending}* |\n`;
-          }
+        if (catRows.length > 1) {
+          const catVol = catRows.reduce((s, r) => s + r.volume, 0);
+          const catComp = catRows.reduce((s, r) => s + r.completed, 0);
+          const catPend = catRows.reduce((s, r) => s + r.pending, 0);
           report += `| *Total* | | *${catVol}* | *${catComp}* | *${catPend}* |\n`;
         }
-        report += `\n`;
-      }
-    }
-
-    // Completed processes section — with week numbers
-    if (allCompleted.length > 0) {
-      report += `${'═'.repeat(50)}\n`;
-      report += `*✅ Completed Processes (No Pending)*\n\n`;
-
-      for (const mp of sortedMarketplaces) {
-        const mpCompleted = allCompleted.filter(r => r.marketplace === mp);
-        if (mpCompleted.length === 0) continue;
-
-        const byCat = {};
-        for (const r of mpCompleted) {
-          if (!byCat[r.category]) byCat[r.category] = [];
-          byCat[r.category].push(`${r.name} (W${r.week})`);
-        }
-
-        const parts = [];
-        for (const cat of CAT_ORDER) {
-          if (!byCat[cat]) continue;
-          parts.push(`${cat}: ${byCat[cat].join(', ')}`);
-        }
-
-        report += `• *${mp}* — ${parts.join(' | ')} ✅\n`;
       }
       report += `\n`;
     }
 
-    report += `${'═'.repeat(50)}\n`;
-    report += `_Sent via Stark Audit Auto-Report (${username})_`;
+    report += `_Sent via Stark Audit Report (${username})_`;
     return report;
   }
 
@@ -264,7 +220,7 @@
 
     const header = document.createElement('div');
     header.style.cssText = 'background:linear-gradient(135deg,#1a1a2e,#16213e);color:#fff;padding:14px 18px;font-weight:700;font-size:15px;display:flex;justify-content:space-between;align-items:center;';
-    header.innerHTML = '<span>⚡ Stark Audit Report v8.3</span>';
+    header.innerHTML = '<span>Stark Audit Report v8.4</span>';
     const closeBtn = document.createElement('button');
     closeBtn.innerHTML = '✕';
     closeBtn.style.cssText = 'background:none;border:none;color:#fff;font-size:18px;cursor:pointer;';
@@ -319,24 +275,24 @@
     }
 
     function renderReport(elapsed) {
-      let debugLog = `👤 User: ${lastUsername}\n\n📡 Discovered ${lastSources.length} sources:\n`;
+      let debugLog = `User: ${lastUsername}\n\nDiscovered ${lastSources.length} sources:\n`;
       for (const mp of MARKETPLACE_ORDER) {
         const mpSources = lastSources.filter(s => s.marketplace === mp);
         if (mpSources.length === 0) continue;
-        debugLog += `\n  🌍 ${mp} (${mpSources.length}):\n`;
+        debugLog += `\n  ${mp} (${mpSources.length}):\n`;
         for (const cat of CAT_ORDER) {
           const catSources = mpSources.filter(s => s.category === cat);
           if (catSources.length === 0) continue;
           debugLog += `    ${cat}:\n`;
-          for (const s of catSources) debugLog += `      • ${s.name}\n`;
+          for (const s of catSources) debugLog += `      - ${s.name}\n`;
         }
       }
       debugLog += `\n${'─'.repeat(40)}\n`;
-      for (const r of successRows) debugLog += `✅ ${r.name} (${r.category}/${r.marketplace}) Wk${r.week}: Vol=${r.volume} Comp=${r.completed} Pend=${r.pending}\n`;
-      for (const f of failedTasks) debugLog += `❌ ${f.name} (${f.cat}/${f.marketplace}) Wk${f.week}: Failed after retries\n`;
+      for (const r of successRows) debugLog += `OK  ${r.name} (${r.category}/${r.marketplace}) Wk${r.week}: Vol=${r.volume} Comp=${r.completed} Pend=${r.pending}\n`;
+      for (const f of failedTasks) debugLog += `ERR ${f.name} (${f.cat}/${f.marketplace}) Wk${f.week}: Failed\n`;
 
       debugDiv.style.display = 'block';
-      debugDiv.textContent = `👤 ${lastUsername} | ${lastSources.length} sources | ${totalCalls} calls in ${elapsed}s | Failed: ${failedTasks.length}\n${'─'.repeat(40)}\n${debugLog}`;
+      debugDiv.textContent = `${lastUsername} | ${lastSources.length} sources | ${totalCalls} calls in ${elapsed}s | Failed: ${failedTasks.length}\n${'─'.repeat(40)}\n${debugLog}`;
 
       lastReport = generateReport(successRows, lastUsername);
       previewDiv.style.display = 'block';
@@ -352,12 +308,12 @@
           GM_setClipboard(lastReport);
           statusDiv.style.background = '#e8f8f0';
           statusDiv.style.color = '#155724';
-          statusDiv.innerHTML = '✅ Copied! Paste in Slack.';
+          statusDiv.innerHTML = 'Copied! Paste in Slack.';
         } catch (e) {
           navigator.clipboard.writeText(lastReport).then(() => {
-            statusDiv.innerHTML = '✅ Copied! Paste in Slack.';
+            statusDiv.innerHTML = 'Copied! Paste in Slack.';
           }).catch(() => {
-            statusDiv.innerHTML = '⚠️ Copy failed — select text manually.';
+            statusDiv.innerHTML = 'Copy failed — select text manually.';
           });
         }
       };
@@ -366,18 +322,18 @@
       if (failedTasks.length > 0) {
         statusDiv.style.background = '#fef9e7';
         statusDiv.style.color = '#856404';
-        statusDiv.innerHTML = `⚠️ <b>${lastUsername}</b> — Done in ${elapsed}s. ${failedTasks.length} failed.`;
+        statusDiv.innerHTML = `<b>${lastUsername}</b> — Done in ${elapsed}s. ${failedTasks.length} failed.`;
 
         const retryBtn = document.createElement('button');
-        retryBtn.innerHTML = `🔄 Retry ${failedTasks.length} Failed`;
+        retryBtn.innerHTML = `Retry ${failedTasks.length} Failed`;
         retryBtn.style.cssText = 'padding:8px 16px;border-radius:6px;border:none;background:#e67e22;color:#fff;font-size:13px;font-weight:600;cursor:pointer;';
         retryBtn.onclick = async () => {
           retryBtn.disabled = true;
-          retryBtn.innerHTML = '⏳ Retrying...';
+          retryBtn.innerHTML = 'Retrying...';
           retryBtn.style.opacity = '0.6';
           statusDiv.style.background = '#ebf5fb';
           statusDiv.style.color = '#2980b9';
-          statusDiv.innerHTML = `⏳ Retrying ${failedTasks.length} failed calls...`;
+          statusDiv.innerHTML = `Retrying ${failedTasks.length} failed calls...`;
 
           const retryStart = Date.now();
           const toRetry = [...failedTasks];
@@ -403,7 +359,7 @@
       } else {
         statusDiv.style.background = '#e8f8f0';
         statusDiv.style.color = '#155724';
-        statusDiv.innerHTML = `✅ <b>${lastUsername}</b> — Done in ${elapsed}s. All queues fetched!`;
+        statusDiv.innerHTML = `<b>${lastUsername}</b> — Done in ${elapsed}s. All queues fetched.`;
       }
     }
 
@@ -421,18 +377,18 @@
       if (!username) {
         statusDiv.style.background = '#fdecea';
         statusDiv.style.color = '#721c24';
-        statusDiv.innerHTML = '❌ Could not detect username. Make sure the Stark page is fully loaded.';
+        statusDiv.innerHTML = 'Could not detect username. Make sure the Stark page is fully loaded.';
         return;
       }
       lastUsername = username;
-      statusDiv.innerHTML = `⏳ <b>${username}</b> — discovering sources...`;
+      statusDiv.innerHTML = `<b>${username}</b> — discovering sources...`;
 
       const startTime = Date.now();
       const sources = await discoverSources(username);
       if (!sources || sources.length === 0) {
         statusDiv.style.background = '#fdecea';
         statusDiv.style.color = '#721c24';
-        statusDiv.innerHTML = `❌ No sources found for <b>${username}</b>.`;
+        statusDiv.innerHTML = `No sources found for <b>${username}</b>.`;
         return;
       }
       lastSources = sources;
@@ -445,7 +401,7 @@
         }
       }
       totalCalls = tasks.length;
-      statusDiv.innerHTML = `⏳ <b>${username}</b> — fetching ${totalCalls} counts (all parallel)...`;
+      statusDiv.innerHTML = `<b>${username}</b> — fetching ${totalCalls} counts...`;
 
       const results = await Promise.all(
         tasks.map(t =>
